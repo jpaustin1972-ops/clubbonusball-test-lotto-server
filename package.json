@@ -1,0 +1,10 @@
+{
+  "name": "club-bonus-ball-lotto-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "TEST server for retrieving UK Lotto Round 1 results",
+  "main": "server.js",
+  "scripts": {"start": "node server.js"},
+  "engines": {"node": ">=20"},
+  "dependencies": {"cheerio": "^1.1.2", "express": "^5.1.0"}
+}
