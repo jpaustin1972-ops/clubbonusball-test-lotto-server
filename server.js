@@ -1,168 +1,139 @@
 const express = require('express');
-const cheerio = require('cheerio');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
-const USER_AGENT = 'ClubBonusBall-TEST-LottoServer/1.2';
+const USER_AGENT = 'ClubBonusBall-TEST-LottoServer/2.0';
 
 app.get('/health', (req, res) => {
   res.json({
     ok: true,
     service: 'Club Bonus Ball TEST Lotto Server',
     environment: 'TEST',
-    version: '1.2'
+    version: '2.0'
   });
 });
 
-function cleanText(s) {
-  return String(s || '')
-    .replace(/\u00a0/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+function getUKDateParts() {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/London',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(new Date());
+
+  const get = type => parts.find(p => p.type === type)?.value;
+
+  return {
+    year: Number(get('year')),
+    month: Number(get('month')),
+    day: Number(get('day'))
+  };
 }
 
-function uniqueSix(nums) {
-  const out = [];
+function getLatestSaturdayISO() {
+  const { year, month, day } = getUKDateParts();
 
-  for (const value of nums.map(Number)) {
-    if (
-      Number.isInteger(value) &&
-      value >= 1 &&
-      value <= 59 &&
-      !out.includes(value)
-    ) {
-      out.push(value);
-    }
+  const d = new Date(Date.UTC(year, month - 1, day));
+  const dayOfWeek = d.getUTCDay();
+
+  const daysBack = dayOfWeek === 6 ? 0 : dayOfWeek + 1;
+
+  d.setUTCDate(d.getUTCDate() - daysBack);
+
+  return d.toISOString().slice(0, 10);
+}
+
+function validSix(numbers) {
+  if (!Array.isArray(numbers) || numbers.length !== 6) {
+    return false;
   }
 
-  return out.length === 6 ? out : null;
+  const unique = [...new Set(
+    numbers.map(Number).filter(
+      n => Number.isInteger(n) && n >= 1 && n <= 59
+    )
+  )];
+
+  return unique.length === 6;
 }
 
-function dateISO(day, monthName, year) {
-  const months = {
-    january: 1,
-    february: 2,
-    march: 3,
-    april: 4,
-    may: 5,
-    june: 6,
-    july: 7,
-    august: 8,
-    september: 9,
-    october: 10,
-    november: 11,
-    december: 12
-  };
+async function getLatestLottoResult() {
 
-  const month = months[String(monthName).toLowerCase()];
+  if (!process.env.LOTTERY_API_KEY) {
+    throw new Error('LOTTERY_API_KEY is not configured on the TEST server.');
+  }
 
-  if (!month) return null;
+  const drawDate = getLatestSaturdayISO();
 
-  return `${year}-${String(month).padStart(2, '0')}-${String(Number(day)).padStart(2, '0')}`;
-}
+  const url =
+    `https://www.lotteryresultsfeed.com/api/lottery/results?id=727&draw_date=${drawDate}`;
 
-async function fetchPage(url) {
   const response = await fetch(url, {
     headers: {
-      'user-agent': USER_AGENT,
-      'accept': 'text/html,application/xhtml+xml,text/plain,*/*',
-      'accept-language': 'en-GB,en;q=0.9'
-    },
-    redirect: 'follow'
+      'Accept': 'application/json',
+      'Authorization': `Bearer ${process.env.LOTTERY_API_KEY}`,
+      'User-Agent': USER_AGENT
+    }
   });
 
   if (!response.ok) {
     throw new Error(
-      `${new URL(url).hostname} returned HTTP ${response.status}`
+      `LotteryResultsFeed returned HTTP ${response.status}`
     );
   }
 
-  return await response.text();
-}
+  const data = await response.json();
 
-function parseNationalLotteryCom(html) {
-  const $ = cheerio.load(html);
-  const text = cleanText($('body').text());
+  if (!data || !Array.isArray(data.results)) {
+    throw new Error('LotteryResultsFeed returned an unexpected response.');
+  }
 
   /*
-    Saturday draw
-    Round 1
-    Six main numbers only
+   * IMPORTANT:
+   * We only accept Saturday Round 1.
+   * Round 2 is deliberately ignored.
+   */
 
-    Bonus Ball is deliberately ignored.
-    Round 2 is deliberately ignored.
-  */
+  const round1 = data.results.find(result => {
 
-  const pattern =
-    /Saturday\s+(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+)\s+(\d{4})\s+Round\s*1\s*:?\s*((?:\d{1,2}\s+){5}\d{1,2})/gi;
-
-  const matches = [...text.matchAll(pattern)];
-
-  if (!matches.length) {
-    throw new Error(
-      'Could not find a Saturday Round 1 result on the results page.'
-    );
-  }
-
-  for (const match of matches) {
-    const [, day, month, year, numbersText] = match;
-
-    const drawDate = dateISO(day, month, year);
-
-    const numbers = uniqueSix(
-      numbersText.match(/\d{1,2}/g) || []
-    );
-
-    if (!drawDate || !numbers) continue;
-
-    return {
-      date: drawDate,
-      numbers,
-      source: 'national-lottery.com',
-      sourceLabel: 'National Lottery results page',
-      verifiedAgainstOfficial: false
-    };
-  }
-
-  throw new Error(
-    'A Saturday draw was found, but six valid Round 1 numbers could not be read.'
-  );
-}
-
-async function getLatest() {
-
-  const urls = [
-    'https://www.national-lottery.com/lotto/results',
-    'https://www.national-lottery.com/lotto/results/history'
-  ];
-
-  const errors = [];
-
-  for (const url of urls) {
-
-    try {
-
-      const html = await fetchPage(url);
-
-      return parseNationalLotteryCom(html);
-
-    } catch (error) {
-
-      errors.push(
-        `${url}: ${error.message}`
-      );
-
+    if (!result || result.draw_date !== drawDate) {
+      return false;
     }
+
+    return String(result.draw_type || '')
+      .toLowerCase()
+      .includes('round 1');
+
+  });
+
+  if (!round1) {
+    throw new Error(
+      `No Saturday Round 1 Lotto result is available for ${drawDate}.`
+    );
   }
 
-  throw new Error(errors.join('; '));
+  if (!validSix(round1.balls)) {
+    throw new Error(
+      'The Lotto API did not return exactly six valid main numbers.'
+    );
+  }
+
+  const numbers = round1.balls.map(Number);
+
+  return {
+    date: round1.draw_date,
+    numbers: numbers,
+    source: 'lotteryresultsfeed.com',
+    sourceLabel: 'Lottery Results Feed',
+    verifiedAgainstOfficial: false
+  };
 }
 
 async function lottoLatest(req, res) {
 
   try {
 
-    const result = await getLatest();
+    const result = await getLatestLottoResult();
 
     res.set('Cache-Control', 'no-store');
 
@@ -178,9 +149,7 @@ async function lottoLatest(req, res) {
 
     res.status(503).json({
       ok: false,
-      error:
-        error.message ||
-        'Lotto result is not available yet.',
+      error: error.message || 'Lotto result is not available.',
       retrievedAt: new Date().toISOString()
     });
 
@@ -188,21 +157,15 @@ async function lottoLatest(req, res) {
 }
 
 // Existing TEST app route
-app.get(
-  '/api/test/lotto/latest',
-  lottoLatest
-);
+app.get('/api/test/lotto/latest', lottoLatest);
 
-// New route for future app versions
-app.get(
-  '/api/v1/uk-lotto/latest',
-  lottoLatest
-);
+// New route
+app.get('/api/v1/uk-lotto/latest', lottoLatest);
 
 app.listen(PORT, () => {
 
   console.log(
-    `Club Bonus Ball TEST Lotto Server v1.2 listening on ${PORT}`
+    `Club Bonus Ball TEST Lotto Server v2.0 listening on ${PORT}`
   );
 
 });
